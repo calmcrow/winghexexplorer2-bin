@@ -1,0 +1,157 @@
+name: Build & Release winghexexplorer2-bin
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: build-winghexexplorer2-bin
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      new: ${{ steps.check.outputs.new }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check upstream for new version
+        id: check
+        run: |
+          set -euo pipefail
+          NEW="$(curl -sL --fail --retry 3 --retry-all-errors \
+            https://api.github.com/repos/Wing-summer/WingHexExplorer2/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')"
+          OLD="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+          echo "old=$OLD new=$NEW"
+          [ -n "$NEW" ] && [ "$NEW" != "null" ] || { echo "failed to fetch upstream version"; exit 1; }
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          if [ "$NEW" != "$OLD" ] && [ "$(printf '%s\n%s\n' "$OLD" "$NEW" | sort -V | tail -n1)" = "$NEW" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  bump:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Initialize build environment
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed base-devel curl git jq openssh sudo \
+            cmake ninja clang nodejs qt6-base qt6-tools qt6-translations github-cli
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+      - uses: actions/checkout@v5
+
+      - name: Configure AUR SSH
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cp "$GITHUB_WORKSPACE/.github/ssh/known_hosts_aur" ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          unset AUR_SSH_KEY
+
+      - name: Build upstream PKGBUILD from AUR
+        run: |
+          set -euo pipefail
+          git clone https://aur.archlinux.org/winghexexplorer2.git /tmp/src
+          cd /tmp/src
+          chown -R builder:builder /tmp/src
+          sudo -u builder makepkg -sf --noconfirm
+          ls -la /tmp/src/*.pkg.tar.zst
+
+      - name: Parse artifact info
+        id: pkg
+        run: |
+          set -euo pipefail
+          PKG="$(ls /tmp/src/*.pkg.tar.zst | head -n1)"
+          VER="$(basename "$PKG" | sed -E 's/^winghexexplorer2-([^-]+)-([0-9]+)-x86_64\.pkg\.tar\.zst$/\1/')"
+          REL="$(basename "$PKG" | sed -E 's/^winghexexplorer2-([^-]+)-([0-9]+)-x86_64\.pkg\.tar\.zst$/\2/')"
+          SHA="$(sha256sum "$PKG" | awk '{print $1}')"
+          echo "ver=$VER rel=$REL sha=$SHA"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "rel=$REL" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact to GitHub Release
+        env:
+          VER: ${{ steps.pkg.outputs.ver }}
+        run: |
+          set -euo pipefail
+          PKG="$(ls /tmp/src/*.pkg.tar.zst | head -n1)"
+          gh release create "v$VER" --title "WingHexExplorer2 $VER" \
+            --notes "Pre-built x86_64 binary built by GitHub Actions using the upstream PKGBUILD (https://aur.archlinux.org/winghexexplorer2.git)." \
+            --repo "$GITHUB_REPOSITORY" || true
+          gh release upload "v$VER" "$PKG" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Clone AUR, bump, verify and push AUR
+        env:
+          VER: ${{ steps.pkg.outputs.ver }}
+          REL: ${{ steps.pkg.outputs.rel }}
+          SHA: ${{ steps.pkg.outputs.sha }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f ~/.ssh/id_ed25519' EXIT
+          export GIT_SSH_COMMAND="ssh -i /github/home/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/github/home/.ssh/known_hosts"
+          git clone ssh://aur@aur.archlinux.org/winghexexplorer2-bin.git /tmp/aur
+          cd /tmp/aur
+          OLD_AUR="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+          echo "AUR old=$OLD_AUR new=$VER"
+          if [ "$VER" = "$OLD_AUR" ]; then
+            echo "AUR already up to date (GitHub behind); syncing GitHub only"
+            cp PKGBUILD .SRCINFO "$GITHUB_WORKSPACE/"
+            exit 0
+          fi
+          sed -i "s/^pkgver=.*/pkgver=$VER/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=$REL/" PKGBUILD
+          sed -i "s/^sha256sums=.*$/sha256sums=('$SHA')/" PKGBUILD
+          grep -q "^pkgver=$VER$" PKGBUILD
+          grep -q "^pkgrel=$REL$" PKGBUILD
+          grep -q "^sha256sums=('$SHA')$" PKGBUILD
+          chown -R builder:builder /tmp/aur
+          sudo -u builder bash -c 'cd /tmp/aur && makepkg --printsrcinfo > .SRCINFO'
+          sudo -u builder bash -c 'cd /tmp/aur && makepkg -f'
+          git config --global --add safe.directory /tmp/aur
+          git config user.name "aur-bot"
+          git config user.email "calmcrow@outlook.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --check
+          git commit -m "winghexexplorer2-bin ${VER}-${REL}: bump from upstream"
+          git push origin master
+          cp PKGBUILD .SRCINFO "$GITHUB_WORKSPACE/"
+
+      - name: Sync GitHub
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          VER="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+          REL="$(sed -n 's/^pkgrel=//p' PKGBUILD)"
+          git config user.name "aur-bot"
+          git config user.email "calmcrow@outlook.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --check
+          git commit -m "sync winghexexplorer2-bin ${VER}-${REL} to GitHub"
+          git push origin main
