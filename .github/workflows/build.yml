@@ -32,13 +32,16 @@ jobs:
           REL_CODE="$(curl -sL -o /dev/null -w '%{http_code}' \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/v$NEW/winghexexplorer2-$NEW-1-x86_64.pkg.tar.zst")"
           AUR_VER="$(curl -sL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=winghexexplorer2-bin" | sed -n 's/^pkgver=//p')"
-          echo "upstream=$NEW release_http=$REL_CODE aur=$AUR_VER"
+          AUR_SHA="$(curl -sL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=winghexexplorer2-bin" | sed -n "s/^sha256sums=('\([0-9a-f]*\)')/\1/p")"
+          echo "upstream=$NEW release_http=$REL_CODE aur=$AUR_VER aur_sha=$AUR_SHA"
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
           if [ "$NEW" != "$OLD" ] && [ "$(printf '%s\n%s\n' "$OLD" "$NEW" | sort -V | tail -n1)" = "$NEW" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           elif [ "$REL_CODE" != "200" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           elif [ "$AUR_VER" != "$NEW" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$AUR_SHA" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -61,7 +64,8 @@ jobs:
           pacman -Sy --noconfirm archlinux-keyring
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed base-devel curl git jq openssh sudo \
-            cmake ninja clang nodejs npm qt6-base qt6-tools qt6-declarative qt6-translations github-cli
+            cmake ninja clang nodejs npm qt6-base qt6-tools qt6-declarative qt6-translations github-cli \
+            xdg-utils shared-mime-info desktop-file-utils gtk-update-icon-cache
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
 
