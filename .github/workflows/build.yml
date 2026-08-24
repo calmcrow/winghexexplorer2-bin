@@ -61,7 +61,7 @@ jobs:
           pacman -Sy --noconfirm archlinux-keyring
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed base-devel curl git jq openssh sudo \
-            cmake ninja clang nodejs qt6-base qt6-tools qt6-translations github-cli
+            cmake ninja clang nodejs npm qt6-base qt6-tools qt6-translations github-cli
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
 
