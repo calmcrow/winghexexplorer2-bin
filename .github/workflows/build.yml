@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if everything is in sync'
+        required: false
+        default: 'false'
 
 concurrency:
   group: build-winghexexplorer2-bin
@@ -49,7 +54,7 @@ jobs:
 
   bump:
     needs: check
-    if: needs.check.outputs.changed == 'true'
+    if: needs.check.outputs.changed == 'true' || github.event.inputs.force == 'true'
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
@@ -89,6 +94,8 @@ jobs:
           set -euo pipefail
           git clone https://aur.archlinux.org/winghexexplorer2.git /tmp/src
           cd /tmp/src
+          sed -i 's/-D WINGHEX_OPTIMIZE_FOR_NATIVE=ON/-D WINGHEX_OPTIMIZE_FOR_NATIVE=OFF/' PKGBUILD
+          grep -q 'WINGHEX_OPTIMIZE_FOR_NATIVE=OFF' PKGBUILD
           chown -R builder:builder /tmp/src
           sudo -u builder makepkg -sf --noconfirm
           ls -la /tmp/src/*.pkg.tar.zst
