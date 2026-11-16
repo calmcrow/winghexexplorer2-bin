@@ -27,11 +27,29 @@ jobs:
 
       - name: Check upstream, Release and AUR consistency
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NEW="$(curl -sL --fail --retry 3 --retry-all-errors \
-            https://api.github.com/repos/Wing-summer/WingHexExplorer2/releases/latest \
-            | jq -r '.tag_name' | sed 's/^v//')"
+          # Authenticate: the anonymous API quota is 60 requests/hour per IP and the
+          # hosted runner IP is shared, so the upstream query used to fail with
+          # HTTP 403/429 and took the whole job down.  A token lifts the quota to
+          # 5000/hour.  A 403/429 is treated as "try again tomorrow" rather than a
+          # build failure; any other non-200 status is still a hard error.
+          RESP="$(curl -sL --retry 5 --retry-delay 5 --retry-all-errors \
+            -w '\n%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Wing-summer/WingHexExplorer2/releases/latest)"
+          STATUS="$(printf '%s\n' "$RESP" | tail -n1)"
+          BODY="$(printf '%s\n' "$RESP" | sed '$d')"
+          if [ "$STATUS" = "403" ] || [ "$STATUS" = "429" ]; then
+            echo "::warning::upstream release API rate limited (HTTP $STATUS); skipping this run"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$STATUS" = "200" ] || { echo "::error::upstream release API returned HTTP $STATUS"; exit 1; }
+          NEW="$(printf '%s' "$BODY" | jq -r '.tag_name' | sed 's/^v//')"
           [ -n "$NEW" ] && [ "$NEW" != "null" ] || { echo "failed to fetch upstream version"; exit 1; }
           OLD="$(sed -n 's/^pkgver=//p' PKGBUILD)"
           REL_CODE="$(curl -sL -o /dev/null -w '%{http_code}' \
